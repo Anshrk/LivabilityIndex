@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LivabilityAI Pro</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #f1f5f9; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        iframe { transition: opacity 0.3s ease-in-out; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-900 font-sans">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+        const API_BASE = "http://127.0.0.1:8000";
+
+        // COMPLETE FIELD CONFIGURATION
+        const FIELD_CONFIG = {
+            // Core
+            livability_score: { label: "Score", default: true },
+            aqi: { label: "AQI", default: true },
+            local_congestion: { label: "Traffic", default: true },
+            sqft_price: { label: "Price/Sqft", default: true },
+            
+            // Amenities
+            hospital: { label: "Hospitals", default: true },
+            school: { label: "Schools", default: false },
+            park: { label: "Parks", default: false },
+            library: { label: "Libraries", default: false },
+            playground: { label: "Playgrounds", default: false },
+            supermarket: { label: "Supermarkets", default: false },
+            store: { label: "Stores", default: false },
+            
+            // Environmental / Civic
+            wqi: { label: "Water Qual", default: false },
+            wqi_category: { label: "Water Cat", default: false },
+            hdi_rank: { label: "HDI Rank", default: false },
+            voter_turnout: { label: "Voter Turnout", default: false },
+            
+            // Hidden by default
+            congestion: { label: "City Congestion", default: false },
+        };
+
+        function App() {
+            const [cities, setCities] = useState([]);
+            const [selectedCity, setSelectedCity] = useState("");
+            const [areas, setAreas] = useState([]);
+            const [activeLocation, setActiveLocation] = useState(null);
+            const [sortBy, setSortBy] = useState("livability_score");
+            const [ascending, setAscending] = useState(false); 
+            const [loading, setLoading] = useState(false);
+            
+            // Chat State
+            const [chatOpen, setChatOpen] = useState(false);
+            const [chatQuery, setChatQuery] = useState("");
+            const [chatHistory, setChatHistory] = useState([
+                { type: 'bot', text: "Hello! I analyze all city data. Try asking:" },
+                { type: 'hint', text: "👉 'Areas with good libraries'" },
+                { type: 'hint', text: "👉 'Clean water and parks'" },
+                { type: 'hint', text: "👉 'Budget under 6000'" }
+            ]);
+            const chatEndRef = useRef(null);
+
+            const [visibleFields, setVisibleFields] = useState(
+                Object.keys(FIELD_CONFIG).reduce((acc, key) => { acc[key] = FIELD_CONFIG[key].default; return acc; }, {})
+            );
+
+            useEffect(() => {
+                axios.get(`${API_BASE}/cities`).then(res => {
+                    setCities(res.data);
+                    if(res.data.length > 0) setSelectedCity(res.data[0]);
+                });
+            }, []);
+
+            useEffect(() => {
+                if(!selectedCity) return;
+                setLoading(true);
+                axios.get(`${API_BASE}/data?city=${selectedCity}&sort_by=${sortBy}&ascending=${ascending}&limit=50`)
+                    .then(res => {
+                        setAreas(res.data);
+                        setLoading(false);
+                        if(res.data.length > 0 && !activeLocation) setActiveLocation(res.data[0]);
+                    });
+            }, [selectedCity, sortBy, ascending]);
+
+            useEffect(() => {
+                chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+            }, [chatHistory]);
+
+            const toggleSort = (field) => {
+                if (sortBy === field) setAscending(!ascending);
+                else {
+                    setSortBy(field);
+                    // Lower is better for these fields
+                    setAscending(['aqi', 'local_congestion', 'sqft_price', 'wqi', 'hdi_rank'].includes(field));
+                }
+            };
+
+            const handleChatSubmit = (e) => {
+                e.preventDefault();
+                if (!chatQuery.trim()) return;
+
+                const query = chatQuery;
+                setChatHistory(prev => [...prev, { type: 'user', text: query }]);
+                setChatQuery("");
+
+                axios.get(`${API_BASE}/recommend?query=${query}&city=${selectedCity}`)
+                    .then(res => {
+                        if (res.data.length === 0) {
+                            setChatHistory(prev => [...prev, { type: 'bot', text: "No matches found." }]);
+                        } else {
+                            const topMatches = res.data;
+                            
+                            // 1. UPDATE CHAT
+                            setChatHistory(prev => [...prev, { type: 'bot', text: `Found ${topMatches.length} matches. Updating table...`, data: topMatches }]);
+                            
+                            // 2. REORDER TABLE (Put matches at the top)
+                            // Filter out the matches from current areas to avoid duplicates, then merge
+                            const otherAreas = areas.filter(a => !topMatches.find(m => m.area === a.area));
+                            const newAreaList = [...topMatches, ...otherAreas];
+                            
+                            setAreas(newAreaList);
+
+                            // 3. AUTO-SELECT BEST MATCH
+                            if (topMatches.length > 0) {
+                                setActiveLocation(topMatches[0]);
+                            }
+                        }
+                    })
+                    .catch(() => setChatHistory(prev => [...prev, { type: 'bot', text: "Error connecting to AI." }]));
+            };
+
+            return (
+                <div className="min-h-screen pb-12 flex flex-col relative font-sans text-slate-900 bg-slate-50">
+                    
+                    {/* Header */}
+                    <div className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm px-6 py-3 flex justify-between items-center">
+                        <div className="flex items-center gap-2">
+                            <span className="bg-indigo-600 text-white p-1.5 rounded-lg font-bold">L</span>
+                            <h1 className="text-xl font-black tracking-tight text-slate-800">Livability<span className="text-indigo-600">AI</span></h1>
+                        </div>
+                        <select 
+                            className="bg-slate-100 hover:bg-slate-200 font-bold py-2 px-4 rounded-lg cursor-pointer focus:outline-none focus:ring-2 focus:ring-indigo-500 transition text-sm"
+                            value={selectedCity}
+                            onChange={(e) => setSelectedCity(e.target.value)}
+                        >
+                            {cities.map(c => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                    </div>
+
+                    <div className="max-w-[1800px] mx-auto px-4 py-6 w-full grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                        
+                        {/* LEFT: Map & Stats */}
+                        <div className="lg:col-span-4 xl:col-span-3 space-y-4 lg:sticky lg:top-24">
+                            <div className="bg-white p-1 rounded-2xl shadow-lg border border-slate-200">
+                                <div className="relative w-full aspect-square bg-slate-200 rounded-xl overflow-hidden group">
+                                    {activeLocation ? (
+                                        <iframe 
+                                            className="w-full h-full"
+                                            frameBorder="0" 
+                                            scrolling="no" 
+                                            src={`https://maps.google.com/maps?q=${activeLocation.latitude},${activeLocation.longitude}&hl=en&z=15&output=embed`}
+                                        ></iframe>
+                                    ) : (
+                                        <div className="flex items-center justify-center h-full text-slate-400 font-bold">Select an area</div>
+                                    )}
+                                    <div className="absolute bottom-3 left-3 bg-white/95 backdrop-blur px-3 py-1.5 rounded-lg shadow-sm border border-slate-200 pointer-events-none">
+                                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Viewing</p>
+                                        <p className="font-bold text-slate-800 text-sm leading-tight">{activeLocation?.area || "..."}</p>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {activeLocation && (
+                                <div className="bg-indigo-900 text-white rounded-2xl p-5 shadow-xl relative overflow-hidden">
+                                    <div className="absolute -top-10 -right-10 w-32 h-32 bg-indigo-500 rounded-full blur-3xl opacity-40"></div>
+                                    <div className="grid grid-cols-2 gap-4 relative z-10">
+                                        <div className="col-span-2 pb-2 border-b border-indigo-800/50">
+                                             <p className="text-indigo-300 text-[10px] uppercase font-bold tracking-widest">Score</p>
+                                             <p className="text-4xl font-black text-white">{activeLocation.livability_score?.toFixed(2)}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-indigo-300 text-[10px] uppercase font-bold">Price / Sqft</p>
+                                            <p className="text-xl font-bold">₹{activeLocation.sqft_price.toLocaleString()}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-indigo-300 text-[10px] uppercase font-bold">AQI Level</p>
+                                            <p className={`text-xl font-bold ${activeLocation.aqi > 100 ? 'text-red-300' : 'text-green-300'}`}>{activeLocation.aqi}</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* RIGHT: Table */}
+                        <div className="lg:col-span-8 xl:col-span-9 space-y-4">
+                            <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+                                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Metrics</h3>
+                                <div className="flex flex-wrap gap-2">
+                                    {Object.keys(FIELD_CONFIG).map(field => (
+                                        <button
+                                            key={field}
+                                            onClick={() => setVisibleFields(prev => ({ ...prev, [field]: !prev[field] }))}
+                                            className={`px-3 py-1.5 rounded-md text-xs font-bold border transition-all ${
+                                                visibleFields[field]
+                                                ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                                                : 'bg-white text-slate-400 border-slate-200 hover:border-slate-300'
+                                            }`}
+                                        >
+                                            {visibleFields[field] ? '✓ ' : '+ '}{FIELD_CONFIG[field].label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div className="bg-white rounded-xl shadow-lg border border-slate-200 overflow-hidden flex flex-col">
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-left border-collapse">
+                                        <thead className="bg-slate-50 border-b border-slate-200 text-xs uppercase text-slate-500 font-semibold tracking-wider sticky top-0">
+                                            <tr>
+                                                <th className="p-4 cursor-pointer hover:text-indigo-600 bg-slate-50 sticky left-0 z-10 border-r border-slate-100" onClick={() => toggleSort('area')}>
+                                                    Area {sortBy === 'area' && (ascending ? '↑' : '↓')}
+                                                </th>
+                                                {Object.keys(FIELD_CONFIG).map(key => visibleFields[key] && (
+                                                    <th 
+                                                        key={key} 
+                                                        className={`p-4 cursor-pointer hover:text-indigo-600 whitespace-nowrap ${key === 'livability_score' ? 'text-indigo-600 bg-indigo-50/50' : ''}`}
+                                                        onClick={() => toggleSort(key)}
+                                                    >
+                                                        {FIELD_CONFIG[key].label} {sortBy === key && (ascending ? '↑' : '↓')}
+                                                    </th>
+                                                ))}
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100 text-sm">
+                                            {loading ? (
+                                                <tr><td colSpan="100%" className="p-12 text-center text-slate-400 italic">Loading...</td></tr>
+                                            ) : areas.map((item, idx) => (
+                                                <tr 
+                                                    key={idx} 
+                                                    onClick={() => setActiveLocation(item)}
+                                                    className={`cursor-pointer transition duration-150 ${
+                                                        activeLocation && activeLocation.area === item.area 
+                                                        ? 'bg-indigo-50/80' 
+                                                        : 'hover:bg-slate-50'
+                                                    }`}
+                                                >
+                                                    <td className="p-4 font-bold text-slate-700 sticky left-0 bg-inherit border-r border-slate-100 z-10">{item.area}</td>
+                                                    {Object.keys(FIELD_CONFIG).map(key => visibleFields[key] && (
+                                                        <td key={key} className={`p-4 ${key === 'livability_score' ? 'bg-indigo-50/30 font-bold text-indigo-700' : ''}`}>
+                                                            {key === 'aqi' ? (
+                                                                <span className={`inline-block px-2 py-0.5 rounded text-[11px] font-bold ${item.aqi < 100 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+                                                                    {item.aqi}
+                                                                </span>
+                                                            ) : key === 'local_congestion' ? (
+                                                                <span className="text-slate-500">{(item[key] * 100).toFixed(0)}%</span>
+                                                            ) : key === 'sqft_price' ? (
+                                                                <span className="font-mono text-xs">₹{item[key] ? item[key].toLocaleString() : 0}</span>
+                                                            ) : (
+                                                                item[key]
+                                                            )}
+                                                        </td>
+                                                    ))}
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Chat Widget */}
+                    <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end font-sans">
+                        {chatOpen && (
+                            <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-80 md:w-96 mb-4 overflow-hidden flex flex-col h-[500px]">
+                                <div className="bg-indigo-600 p-4 flex justify-between items-center text-white">
+                                    <h3 className="font-bold">Livability AI</h3>
+                                    <button onClick={() => setChatOpen(false)} className="hover:bg-indigo-700 p-1 rounded">✕</button>
+                                </div>
+                                <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50">
+                                    {chatHistory.map((msg, i) => (
+                                        <div key={i} className={`flex flex-col ${msg.type === 'user' ? 'items-end' : 'items-start'}`}>
+                                            {msg.type === 'hint' ? (
+                                                <button onClick={() => setChatQuery(msg.text.replace("👉 ", "").replace(/'/g, ""))} className="text-xs text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-2 rounded-full mb-1 transition">{msg.text}</button>
+                                            ) : (
+                                                <div className={`p-3 rounded-xl max-w-[85%] text-sm ${msg.type === 'user' ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-white border border-slate-200 text-slate-700 rounded-tl-none shadow-sm'}`}>{msg.text}</div>
+                                            )}
+                                            {msg.data && (
+                                                <div className="mt-3 space-y-2 w-full">
+                                                    {msg.data.map((area, idx) => (
+                                                        <div key={idx} onClick={() => setActiveLocation(area)} className="bg-white p-3 rounded-lg border border-indigo-100 shadow-sm hover:border-indigo-500 cursor-pointer transition flex justify-between items-center group">
+                                                            <div>
+                                                                <p className="font-bold text-indigo-700 text-sm group-hover:underline">{area.area}</p>
+                                                                <p className="text-xs text-slate-500">Score: {area.livability_score?.toFixed(1)}</p>
+                                                            </div>
+                                                            <div className="text-right">
+                                                                <p className="text-xs font-bold">₹{area.sqft_price.toLocaleString()}</p>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+                                    <div ref={chatEndRef} />
+                                </div>
+                                <form onSubmit={handleChatSubmit} className="p-3 bg-white border-t border-slate-100 flex gap-2">
+                                    <input type="text" className="flex-1 bg-slate-100 border-transparent focus:bg-white focus:ring-2 focus:ring-indigo-500 rounded-lg px-3 py-2 text-sm outline-none transition" placeholder="Ask AI..." value={chatQuery} onChange={(e) => setChatQuery(e.target.value)} />
+                                    <button type="submit" className="bg-indigo-600 hover:bg-indigo-700 text-white p-2 rounded-lg transition">Send</button>
+                                </form>
+                            </div>
+                        )}
+                        <button onClick={() => setChatOpen(!chatOpen)} className="bg-indigo-600 hover:bg-indigo-700 text-white p-4 rounded-full shadow-xl transition-transform hover:scale-105 flex items-center gap-2">
+                            {!chatOpen && <span className="font-bold pr-2">Ask AI</span>}
+                            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" /></svg>
+                        </button>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
