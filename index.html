@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -10,12 +11,26 @@
     <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        ::-webkit-scrollbar { width: 6px; height: 6px; }
-        ::-webkit-scrollbar-track { background: #f1f5f9; }
-        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
-        iframe { transition: opacity 0.3s ease-in-out; }
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #f1f5f9;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 3px;
+        }
+
+        iframe {
+            transition: opacity 0.3s ease-in-out;
+        }
     </style>
 </head>
+
 <body class="bg-slate-50 text-slate-900 font-sans">
     <div id="root"></div>
 
@@ -30,7 +45,7 @@
             aqi: { label: "AQI", default: true },
             local_congestion: { label: "Traffic", default: true },
             sqft_price: { label: "Price/Sqft", default: true },
-            
+
             // Amenities
             hospital: { label: "Hospitals", default: true },
             school: { label: "Schools", default: false },
@@ -39,13 +54,13 @@
             playground: { label: "Playgrounds", default: false },
             supermarket: { label: "Supermarkets", default: false },
             store: { label: "Stores", default: false },
-            
+
             // Environmental / Civic
             wqi: { label: "Water Qual", default: false },
             wqi_category: { label: "Water Cat", default: false },
             hdi_rank: { label: "HDI Rank", default: false },
             voter_turnout: { label: "Voter Turnout", default: false },
-            
+
             // Hidden by default
             congestion: { label: "City Congestion", default: false },
         };
@@ -54,14 +69,37 @@
             const [cities, setCities] = useState([]);
             const [selectedCity, setSelectedCity] = useState("");
             const [areas, setAreas] = useState([]);
+
             const [activeLocation, setActiveLocation] = useState(null);
+
+            // Comparison State
+            const [comparisonList, setComparisonList] = useState([]);
+            const [showComparison, setShowComparison] = useState(false);
+
+            // Update Similar Areas when Active Location changes
+            useEffect(() => {
+                if (!activeLocation || !areas.length) return;
+
+                // Find areas in the same cluster (if cluster_id exists)
+                if (activeLocation.cluster_id !== undefined) {
+                    const similar = areas
+                        .filter(a => a.cluster_id === activeLocation.cluster_id && a.area !== activeLocation.area)
+                        .slice(0, 5); // Show top 5
+                    setSimilarAreas(similar);
+                } else {
+                    setSimilarAreas([]);
+                }
+            }, [activeLocation, areas]);
+
             const [sortBy, setSortBy] = useState("livability_score");
-            const [ascending, setAscending] = useState(false); 
+            const [ascending, setAscending] = useState(false);
             const [loading, setLoading] = useState(false);
-            
+            const [similarAreas, setSimilarAreas] = useState([]);
+
             // Chat State
             const [chatOpen, setChatOpen] = useState(false);
             const [chatQuery, setChatQuery] = useState("");
+            const [chatLoading, setChatLoading] = useState(false);
             const [chatHistory, setChatHistory] = useState([
                 { type: 'bot', text: "Hello! I analyze all city data. Try asking:" },
                 { type: 'hint', text: "👉 'Areas with good libraries'" },
@@ -77,18 +115,20 @@
             useEffect(() => {
                 axios.get(`${API_BASE}/cities`).then(res => {
                     setCities(res.data);
-                    if(res.data.length > 0) setSelectedCity(res.data[0]);
+                    if (res.data.length > 0) setSelectedCity(res.data[0]);
                 });
             }, []);
 
             useEffect(() => {
-                if(!selectedCity) return;
+                if (!selectedCity) return;
                 setLoading(true);
                 axios.get(`${API_BASE}/data?city=${selectedCity}&sort_by=${sortBy}&ascending=${ascending}&limit=50`)
                     .then(res => {
                         setAreas(res.data);
                         setLoading(false);
-                        if(res.data.length > 0 && !activeLocation) setActiveLocation(res.data[0]);
+                        if (res.data.length > 0 && !activeLocation) {
+                            setActiveLocation(res.data[0]);
+                        }
                     });
             }, [selectedCity, sortBy, ascending]);
 
@@ -112,43 +152,83 @@
                 const query = chatQuery;
                 setChatHistory(prev => [...prev, { type: 'user', text: query }]);
                 setChatQuery("");
+                setChatLoading(true);
 
                 axios.get(`${API_BASE}/recommend?query=${query}&city=${selectedCity}`)
                     .then(res => {
-                        if (res.data.length === 0) {
+                        setChatLoading(false);
+
+                        // Handle new API response structure v2 (dict) or v1 (list)
+                        const results = Array.isArray(res.data) ? res.data : (res.data.results || []);
+                        const suggestedFields = res.data.suggested_fields || [];
+
+                        if (results.length === 0) {
                             setChatHistory(prev => [...prev, { type: 'bot', text: "No matches found." }]);
                         } else {
-                            const topMatches = res.data;
-                            
                             // 1. UPDATE CHAT
-                            setChatHistory(prev => [...prev, { type: 'bot', text: `Found ${topMatches.length} matches. Updating table...`, data: topMatches }]);
-                            
-                            // 2. REORDER TABLE (Put matches at the top)
-                            // Filter out the matches from current areas to avoid duplicates, then merge
-                            const otherAreas = areas.filter(a => !topMatches.find(m => m.area === a.area));
-                            const newAreaList = [...topMatches, ...otherAreas];
-                            
+                            let replyText = `Found ${results.length} matches.`;
+                            if (suggestedFields.length > 0) {
+                                replyText += ` I've highlighted parameters related to your search (${suggestedFields.join(", ")}).`;
+                            }
+                            setChatHistory(prev => [...prev, { type: 'bot', text: replyText, data: results }]);
+
+                            // 2. SMART UI ADAPTATION (Auto-Select Columns)
+                            if (suggestedFields.length > 0) {
+                                setVisibleFields(prev => {
+                                    const next = { ...prev };
+                                    // Reset non-core fields
+                                    Object.keys(next).forEach(k => {
+                                        if (!['livability_score', 'sqft_price', 'aqi', 'local_congestion'].includes(k)) {
+                                            next[k] = false;
+                                        }
+                                    });
+                                    // Enable suggested fields
+                                    suggestedFields.forEach(f => {
+                                        if (next[f] !== undefined) next[f] = true;
+                                    });
+                                    return next;
+                                });
+                            }
+
+                            // 3. REORDER TABLE
+                            const otherAreas = areas.filter(a => !results.find(m => m.area === a.area));
+                            const newAreaList = [...results, ...otherAreas];
                             setAreas(newAreaList);
 
-                            // 3. AUTO-SELECT BEST MATCH
                             if (topMatches.length > 0) {
                                 setActiveLocation(topMatches[0]);
                             }
                         }
                     })
-                    .catch(() => setChatHistory(prev => [...prev, { type: 'bot', text: "Error connecting to AI." }]));
+                    .catch(() => {
+                        setChatLoading(false);
+                        setChatHistory(prev => [...prev, { type: 'bot', text: "Error connecting to AI." }]);
+                    });
+            };
+
+            const addToCompare = (area) => {
+                if (comparisonList.find(a => a.area === area.area)) return;
+                if (comparisonList.length >= 2) {
+                    setComparisonList([comparisonList[1], area]); // Keep last one + new one
+                } else {
+                    setComparisonList([...comparisonList, area]);
+                }
+            };
+
+            const removeFromCompare = (areaName) => {
+                setComparisonList(comparisonList.filter(a => a.area !== areaName));
             };
 
             return (
                 <div className="min-h-screen pb-12 flex flex-col relative font-sans text-slate-900 bg-slate-50">
-                    
+
                     {/* Header */}
                     <div className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm px-6 py-3 flex justify-between items-center">
                         <div className="flex items-center gap-2">
                             <span className="bg-indigo-600 text-white p-1.5 rounded-lg font-bold">L</span>
                             <h1 className="text-xl font-black tracking-tight text-slate-800">Livability<span className="text-indigo-600">AI</span></h1>
                         </div>
-                        <select 
+                        <select
                             className="bg-slate-100 hover:bg-slate-200 font-bold py-2 px-4 rounded-lg cursor-pointer focus:outline-none focus:ring-2 focus:ring-indigo-500 transition text-sm"
                             value={selectedCity}
                             onChange={(e) => setSelectedCity(e.target.value)}
@@ -158,16 +238,16 @@
                     </div>
 
                     <div className="max-w-[1800px] mx-auto px-4 py-6 w-full grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-                        
+
                         {/* LEFT: Map & Stats */}
-                        <div className="lg:col-span-4 xl:col-span-3 space-y-4 lg:sticky lg:top-24">
+                        <div className="lg:col-span-4 xl:col-span-3 space-y-4 lg:sticky lg:top-24 max-h-[calc(100vh-8rem)] overflow-y-auto pr-2 scrollbar-hide">
                             <div className="bg-white p-1 rounded-2xl shadow-lg border border-slate-200">
                                 <div className="relative w-full aspect-square bg-slate-200 rounded-xl overflow-hidden group">
                                     {activeLocation ? (
-                                        <iframe 
+                                        <iframe
                                             className="w-full h-full"
-                                            frameBorder="0" 
-                                            scrolling="no" 
+                                            frameBorder="0"
+                                            scrolling="no"
                                             src={`https://maps.google.com/maps?q=${activeLocation.latitude},${activeLocation.longitude}&hl=en&z=15&output=embed`}
                                         ></iframe>
                                     ) : (
@@ -185,8 +265,8 @@
                                     <div className="absolute -top-10 -right-10 w-32 h-32 bg-indigo-500 rounded-full blur-3xl opacity-40"></div>
                                     <div className="grid grid-cols-2 gap-4 relative z-10">
                                         <div className="col-span-2 pb-2 border-b border-indigo-800/50">
-                                             <p className="text-indigo-300 text-[10px] uppercase font-bold tracking-widest">Score</p>
-                                             <p className="text-4xl font-black text-white">{activeLocation.livability_score?.toFixed(2)}</p>
+                                            <p className="text-indigo-300 text-[10px] uppercase font-bold tracking-widest">Score</p>
+                                            <p className="text-4xl font-black text-white">{activeLocation.livability_score?.toFixed(2)}</p>
                                         </div>
                                         <div>
                                             <p className="text-indigo-300 text-[10px] uppercase font-bold">Price / Sqft</p>
@@ -196,7 +276,46 @@
                                             <p className="text-indigo-300 text-[10px] uppercase font-bold">AQI Level</p>
                                             <p className={`text-xl font-bold ${activeLocation.aqi > 100 ? 'text-red-300' : 'text-green-300'}`}>{activeLocation.aqi}</p>
                                         </div>
+
                                     </div>
+                                    {activeLocation.text_desc && (
+                                        <div className="mt-4 pt-4 border-t border-indigo-800/50">
+                                            <p className="text-indigo-300 text-[10px] uppercase font-bold mb-1">AI Analysis</p>
+                                            <p className="text-xs text-indigo-100 italic leading-relaxed opacity-80">
+                                                {activeLocation.text_desc.split("Vibe:")[1] || activeLocation.text_desc}
+                                            </p>
+                                        </div>
+                                    )}
+
+                                    {/* Action Buttons */}
+                                    <div className="mt-4 pt-4 border-t border-indigo-800/50 flex gap-2">
+                                        <button
+                                            onClick={() => addToCompare(activeLocation)}
+                                            className="flex-1 bg-white/10 hover:bg-white/20 text-white py-2 rounded-lg text-xs font-bold transition flex items-center justify-center gap-2"
+                                        >
+                                            <span>🆚</span> Add to Compare {comparisonList.find(a => a.area === activeLocation.area) ? '(Added)' : ''}
+                                        </button>
+                                    </div>
+
+                                    {/* Similar Areas (Cluster) */}
+                                    {similarAreas.length > 0 && (
+                                        <div className="mt-4 pt-4 border-t border-indigo-800/50">
+                                            <div className="flex justify-between items-center mb-2">
+                                                <p className="text-indigo-300 text-[10px] uppercase font-bold">Similar Vibe</p>
+                                                <span className="text-[10px] bg-indigo-800 px-2 py-0.5 rounded-full text-indigo-200">
+                                                    {activeLocation.cluster_label || "Matched"}
+                                                </span>
+                                            </div>
+                                            <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
+                                                {similarAreas.map(sim => (
+                                                    <div key={sim.area} onClick={() => setActiveLocation(sim)} className="min-w-[120px] bg-indigo-800/50 p-2 rounded-lg cursor-pointer hover:bg-indigo-700 transition">
+                                                        <p className="font-bold text-xs truncate">{sim.area}</p>
+                                                        <p className="text-[10px] text-indigo-300">₹{sim.sqft_price}</p>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             )}
                         </div>
@@ -210,11 +329,10 @@
                                         <button
                                             key={field}
                                             onClick={() => setVisibleFields(prev => ({ ...prev, [field]: !prev[field] }))}
-                                            className={`px-3 py-1.5 rounded-md text-xs font-bold border transition-all ${
-                                                visibleFields[field]
+                                            className={`px-3 py-1.5 rounded-md text-xs font-bold border transition-all ${visibleFields[field]
                                                 ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
                                                 : 'bg-white text-slate-400 border-slate-200 hover:border-slate-300'
-                                            }`}
+                                                }`}
                                         >
                                             {visibleFields[field] ? '✓ ' : '+ '}{FIELD_CONFIG[field].label}
                                         </button>
@@ -231,8 +349,8 @@
                                                     Area {sortBy === 'area' && (ascending ? '↑' : '↓')}
                                                 </th>
                                                 {Object.keys(FIELD_CONFIG).map(key => visibleFields[key] && (
-                                                    <th 
-                                                        key={key} 
+                                                    <th
+                                                        key={key}
                                                         className={`p-4 cursor-pointer hover:text-indigo-600 whitespace-nowrap ${key === 'livability_score' ? 'text-indigo-600 bg-indigo-50/50' : ''}`}
                                                         onClick={() => toggleSort(key)}
                                                     >
@@ -245,14 +363,13 @@
                                             {loading ? (
                                                 <tr><td colSpan="100%" className="p-12 text-center text-slate-400 italic">Loading...</td></tr>
                                             ) : areas.map((item, idx) => (
-                                                <tr 
-                                                    key={idx} 
+                                                <tr
+                                                    key={idx}
                                                     onClick={() => setActiveLocation(item)}
-                                                    className={`cursor-pointer transition duration-150 ${
-                                                        activeLocation && activeLocation.area === item.area 
-                                                        ? 'bg-indigo-50/80' 
+                                                    className={`cursor-pointer transition duration-150 ${activeLocation && activeLocation.area === item.area
+                                                        ? 'bg-indigo-50/80'
                                                         : 'hover:bg-slate-50'
-                                                    }`}
+                                                        }`}
                                                 >
                                                     <td className="p-4 font-bold text-slate-700 sticky left-0 bg-inherit border-r border-slate-100 z-10">{item.area}</td>
                                                     {Object.keys(FIELD_CONFIG).map(key => visibleFields[key] && (
@@ -312,6 +429,14 @@
                                             )}
                                         </div>
                                     ))}
+
+                                    {chatLoading && (
+                                        <div className="flex items-start">
+                                            <div className="p-3 rounded-xl bg-indigo-50 border border-indigo-100 text-slate-500 text-sm italic rounded-tl-none animate-pulse">
+                                                🧠 AI is thinking...
+                                            </div>
+                                        </div>
+                                    )}
                                     <div ref={chatEndRef} />
                                 </div>
                                 <form onSubmit={handleChatSubmit} className="p-3 bg-white border-t border-slate-100 flex gap-2">
@@ -325,6 +450,62 @@
                             <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" /></svg>
                         </button>
                     </div>
+
+                    {/* Comparison Widget */}
+                    {comparisonList.length > 0 && (
+                        <div className="fixed bottom-6 left-6 z-50 flex flex-col gap-2">
+                            {showComparison && (
+                                <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 p-6 w-[600px] mb-4 relative">
+                                    <button onClick={() => setShowComparison(false)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600">✕</button>
+                                    <h2 className="text-xl font-black text-slate-800 mb-4">Head-to-Head Comparison</h2>
+
+                                    <div className="grid grid-cols-3 gap-4 text-sm">
+                                        <div className="font-bold text-slate-400 uppercase text-xs pt-12 space-y-4 text-right pr-4">
+                                            <p className="h-8 flex items-center justify-end">Price / Sqft</p>
+                                            <p className="h-8 flex items-center justify-end">Livability Score</p>
+                                            <p className="h-8 flex items-center justify-end">AQI (Air)</p>
+                                            <p className="h-8 flex items-center justify-end">Traffic</p>
+                                            <p className="h-8 flex items-center justify-end">Cluster</p>
+                                        </div>
+                                        {comparisonList.map((item, i) => (
+                                            <div key={i} className="bg-slate-50 rounded-xl p-4 text-center border border-slate-100">
+                                                <div className="h-10 mb-2 font-black text-indigo-700 text-lg leading-tight flex items-center justify-center">{item.area}</div>
+
+                                                <div className="space-y-4">
+                                                    <p className={`h-8 flex items-center justify-center font-bold ${item.sqft_price < (comparisonList[1 - i]?.sqft_price || 999999) ? 'text-emerald-600 bg-emerald-50 rounded' : ''}`}>
+                                                        ₹{item.sqft_price.toLocaleString()}
+                                                    </p>
+                                                    <p className={`h-8 flex items-center justify-center font-bold ${item.livability_score > (comparisonList[1 - i]?.livability_score || -1) ? 'text-emerald-600 bg-emerald-50 rounded' : ''}`}>
+                                                        {item.livability_score?.toFixed(2)}
+                                                    </p>
+                                                    <p className={`h-8 flex items-center justify-center font-bold ${item.aqi < (comparisonList[1 - i]?.aqi || 999) ? 'text-emerald-600 bg-emerald-50 rounded' : ''}`}>
+                                                        {item.aqi}
+                                                    </p>
+                                                    <p className={`h-8 flex items-center justify-center font-bold ${item.local_congestion < (comparisonList[1 - i]?.local_congestion || 999) ? 'text-emerald-600 bg-emerald-50 rounded' : ''}`}>
+                                                        {Math.round(item.local_congestion * 100)}%
+                                                    </p>
+                                                    <p className="h-8 flex items-center justify-center text-xs text-slate-500">
+                                                        {item.cluster_label || "Standard"}
+                                                    </p>
+                                                </div>
+                                                <button onClick={() => removeFromCompare(item.area)} className="mt-4 text-xs text-rose-500 hover:underline">Remove</button>
+                                            </div>
+                                        ))}
+                                        {comparisonList.length === 1 && (
+                                            <div className="border-2 border-dashed border-slate-200 rounded-xl flex items-center justify-center text-slate-300 font-bold text-sm">
+                                                Select another area
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+
+                            <button onClick={() => setShowComparison(!showComparison)} className="bg-slate-900 text-white px-6 py-3 rounded-full shadow-xl font-bold flex items-center gap-3 hover:scale-105 transition">
+                                <span className="text-xl">🆚</span>
+                                <span>Compare ({comparisonList.length})</span>
+                            </button>
+                        </div>
+                    )}
                 </div>
             );
         }
@@ -333,4 +514,5 @@
         root.render(<App />);
     </script>
 </body>
+
 </html>

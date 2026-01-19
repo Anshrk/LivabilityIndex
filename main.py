@@ -5,6 +5,12 @@ import difflib
 from fastapi import FastAPI
 from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
+# --- AI Imports ---
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+import re
 
 app = FastAPI(title="Livability Dashboard API V7 (Final)")
 
@@ -37,6 +43,77 @@ except Exception as e:
     print(f"❌ Error loading CSV: {e}")
     df = pd.DataFrame()
 
+# --- 2. AI Model Initialization ---
+model = None
+embeddings = None
+
+try:
+    print("🤖 Loading AI Model (this may take a moment)...")
+    model = SentenceTransformer('all-MiniLM-L6-v2')
+    
+    # Create text representation for every row for semantic search
+    def create_text_desc(row):
+        congestion = row.get('local_congestion', 1)
+        vibe = 'Quiet and peaceful' if congestion < 1.15 else 'Busy and lively'
+        return f"Area: {row.get('area', '')}. City: {row.get('city', '')}. Price: {row.get('sqft_price', 0)}. " \
+               f"Features: AQI {row.get('aqi', 0)}, {row.get('park', 0)} parks, {row.get('school', 0)} schools, " \
+               f"{row.get('hospital', 0)} hospitals, {row.get('library', 0)} libraries. " \
+               f"Vibe: {vibe}."
+
+    if not df.empty:
+        # 1. Generate Embeddings (NLP)
+        df['text_desc'] = df.apply(create_text_desc, axis=1)
+        print("🧠 Generating embeddings...")
+        embeddings = model.encode(df['text_desc'].tolist())
+        print("✅ Embeddings ready!")
+        
+        # 2. Generate Clusters (K-Means)
+        print("🏙️  Clustering neighborhoods...")
+        # Select features for clustering
+        features = ['sqft_price', 'aqi', 'livability_score', 'local_congestion']
+        # Fill NA just in case
+        X = df[features].fillna(0)
+        
+        # Normalize
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        
+        # Train KMeans (k=6 distinct vibes)
+        kmeans = KMeans(n_clusters=6, random_state=42, n_init=10)
+        df['cluster_id'] = kmeans.fit_predict(X_scaled)
+        
+        # Assign Descriptive Names to Clusters based on their centers
+        # We analyze the mean of each cluster to name it
+        cluster_labels = {}
+        for i in range(6):
+            cluster_mean = df[df['cluster_id'] == i][features].mean()
+            price_score = cluster_mean['sqft_price']
+            aqi_score = cluster_mean['aqi']
+            
+            label = "Standard Area"
+            if price_score > df['sqft_price'].mean() * 1.5:
+                label = "💎 Premium / Luxury"
+            elif price_score < df['sqft_price'].mean() * 0.7:
+                label = "💰 Budget Friendly"
+                
+            if aqi_score < 70:
+                label += " & 🌿 Pure Air"
+            elif aqi_score > 120:
+                label += " & 🏭 Urban/Industrial"
+            
+            cluster_labels[i] = label
+            
+        df['cluster_label'] = df['cluster_id'].map(cluster_labels)
+        print("✅ Clustering complete!")
+
+    else:
+        print("⚠️ DataFrame is empty, skipping embeddings.")
+
+except Exception as e:
+    print(f"❌ Error loading AI model: {e}")
+    print("⚠️ Falling back to keyword search.")
+
+
 # --- 2. Concept Mapping ---
 CONCEPT_MAP = {
     'school': ['school', 'education', 'study', 'kid', 'child', 'student'],
@@ -53,6 +130,23 @@ CONCEPT_MAP = {
     'water': ['water', 'drink', 'tap', 'supply'],
     'playground': ['playground', 'play', 'sport', 'game'],
     'community': ['community', 'civic', 'vote', 'safe', 'people']
+}
+
+# Definitions for Column Relevance (AI Filter Selection)
+COLUMN_DEFINITIONS = {
+    'school': 'schools education study students university college academic',
+    'hospital': 'hospitals clinics medical health doctors emergency',
+    'park': 'parks gardens nature green walking trees outdoors',
+    'library': 'libraries books reading quiet study research',
+    'playground': 'playgrounds sports kids games recreation',
+    'supermarket': 'supermarkets groceries shopping food daily needs',
+    'store': 'stores shops malls retail shopping',
+    'wqi': 'water quality drinking purity clean water pollution',
+    'aqi': 'air quality pollution smog breathing clean air',
+    'local_congestion': 'traffic congestion commute driving roads transport',
+    'sqft_price': 'price cost budget expensive cheap affordable property value',
+    'voter_turnout': 'community civic engagement voting safety people',
+    'hdi_rank': 'development index standard of living'
 }
 
 def get_fuzzy_intent(token):
@@ -154,8 +248,59 @@ def get_city_stats():
 @app.get("/recommend")
 def get_recommendation(query: str, city: Optional[str] = None):
     if df.empty: return []
-    target = df[df['city'] == city].copy() if city else df.copy()
-    if target.empty: return []
 
-    target['match_score'] = target.apply(lambda row: calculate_match_score(row, query), axis=1)
-    return target.sort_values(by='match_score', ascending=False).head(5).to_dict(orient="records")
+    # Filter target indices
+    target_idx = df.index
+    if city:
+        target_idx = df[df['city'] == city].index
+    
+    if len(target_idx) == 0: return []
+    
+    target_df = df.loc[target_idx].copy()
+    
+    # --- Option A: Semantic Search (AI) ---
+    if model is not None and embeddings is not None:
+        try:
+            # 1. Embed query
+            query_embedding = model.encode([query])
+            
+            # 2. Get target embeddings
+            target_embeddings_matrix = embeddings[target_idx]
+            
+            # 3. Calculate Similarity
+            sim_scores = cosine_similarity(query_embedding, target_embeddings_matrix)[0]
+            
+            # 4. Scale to 0-100 match score
+            target_df['match_score'] = sim_scores * 100
+            
+            # 5. Apply Hard Constraints
+            price_cap_match = re.search(r'(?:under|below|max|less than)\s*₹?(\d+)', query.lower())
+            if price_cap_match:
+                cap = float(price_cap_match.group(1))
+                mask_over_budget = target_df['sqft_price'] > cap
+                target_df.loc[mask_over_budget, 'match_score'] -= 50
+            
+            # 6. Identify Relevant Columns (Soft Filtering)
+            suggested_fields = []
+            try:
+                col_names = list(COLUMN_DEFINITIONS.keys())
+                col_texts = list(COLUMN_DEFINITIONS.values())
+                col_embeddings = model.encode(col_texts)
+                col_sim = cosine_similarity(query_embedding, col_embeddings)[0]
+                
+                for i, score in enumerate(col_sim):
+                    if score > 0.25:
+                        suggested_fields.append(col_names[i])
+            except:
+                pass
+
+            top_results = target_df.sort_values(by='match_score', ascending=False).head(5).to_dict(orient="records")
+            return {"results": top_results, "suggested_fields": suggested_fields}
+            
+        except Exception as e:
+            print(f"AI Search Error: {e}. Falling back to rule-based.")
+
+    # --- Option B: Fallback Rule-Based Search ---
+    target_df['match_score'] = target_df.apply(lambda row: calculate_match_score(row, query), axis=1)
+    results = target_df.sort_values(by='match_score', ascending=False).head(5).to_dict(orient="records")
+    return {"results": results, "suggested_fields": []}
