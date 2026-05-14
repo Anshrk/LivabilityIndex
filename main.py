@@ -11,6 +11,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 import re
+from math import radians, sin, cos, sqrt, atan2
 
 app = FastAPI(title="Livability Dashboard API V7 (Final)")
 
@@ -116,9 +117,9 @@ except Exception as e:
 
 # --- 2. Concept Mapping ---
 CONCEPT_MAP = {
-    'school': ['school', 'education', 'study', 'kid', 'child', 'student'],
-    'hospital': ['hospital', 'clinic', 'doctor', 'medical', 'health', 'care'],
-    'park': ['park', 'garden', 'green', 'nature', 'tree', 'walk'],
+    'school': ['school', 'education', 'study', 'kid', 'child', 'children', 'student'],
+    'hospital': ['hospital', 'clinic', 'old', 'parents', 'doctor', 'medical', 'health', 'care'],
+    'park': ['park', 'children','garden', 'green', 'nature', 'tree', 'walk'],
     'traffic': ['traffic', 'jam', 'congestion', 'signal', 'commute', 'drive'],
     'shopping': ['supermarket', 'store', 'mall', 'shop', 'market', 'groceries'],
     'quiet': ['quiet', 'calm', 'peaceful', 'silent'],
@@ -126,9 +127,9 @@ CONCEPT_MAP = {
     'cheap': ['cheap', 'budget', 'affordable', 'low', 'economical', 'rent'],
     'expensive': ['expensive', 'luxury', 'premium', 'rich', 'posh'],
     'clean': ['clean', 'fresh', 'breathe', 'pure', 'air'],
-    'library': ['library', 'book', 'reading', 'literacy'],
+    'library': ['library', 'children', 'book', 'reading', 'literacy'],
     'water': ['water', 'drink', 'tap', 'supply'],
-    'playground': ['playground', 'play', 'sport', 'game'],
+    'playground': ['playground', 'children', 'play', 'sport', 'game'],
     'community': ['community', 'civic', 'vote', 'safe', 'people']
 }
 
@@ -148,6 +149,41 @@ COLUMN_DEFINITIONS = {
     'voter_turnout': 'community civic engagement voting safety people',
     'hdi_rank': 'development index standard of living'
 }
+
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371
+
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+
+    a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
+    c = 2 * atan2(sqrt(a), sqrt(1-a))
+
+    return R * c
+
+
+@app.get("/nearest")
+def nearest(lat: float, lng: float):
+    temp = df.copy()
+
+    temp["distance"] = temp.apply(
+        lambda row: haversine(
+            lat,
+            lng,
+            row["latitude"],
+            row["longitude"]
+        ),
+        axis=1
+    )
+
+    nearest_row = temp.sort_values("distance").iloc[0]
+
+    return nearest_row.to_dict()
+from fastapi.responses import FileResponse
+
+
+
+
 
 def get_fuzzy_intent(token):
     """Finds the best matching concept for a user's word."""
@@ -304,3 +340,11 @@ def get_recommendation(query: str, city: Optional[str] = None):
     target_df['match_score'] = target_df.apply(lambda row: calculate_match_score(row, query), axis=1)
     results = target_df.sort_values(by='match_score', ascending=False).head(5).to_dict(orient="records")
     return {"results": results, "suggested_fields": []}
+
+@app.get("/")
+def home():
+    return FileResponse("index.html")
+
+@app.get("/{full_path:path}")
+def spa_router(full_path: str):
+    return FileResponse("index.html")

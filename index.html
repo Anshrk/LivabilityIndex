@@ -10,6 +10,12 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
+    <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet/dist/leaflet.css"
+    />
+
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
     <style>
         ::-webkit-scrollbar {
             width: 6px;
@@ -66,15 +72,27 @@
         };
 
         function App() {
+            const mapRef = useRef(null);
+            const leafletMap = useRef(null);
+            const markerRef = useRef(null);
             const [cities, setCities] = useState([]);
             const [selectedCity, setSelectedCity] = useState("");
             const [areas, setAreas] = useState([]);
+            const [mapFullscreen, setMapFullscreen] = useState(false);
+            const currentRoute = window.location.pathname;
+            const goToMap = () => window.location.href = "/map";
+            const goHome = () => window.location.href = "/";
 
             const [activeLocation, setActiveLocation] = useState(null);
 
             // Comparison State
             const [comparisonList, setComparisonList] = useState([]);
             const [showComparison, setShowComparison] = useState(false);
+            useEffect(() => {
+    setTimeout(() => {
+        leafletMap.current?.invalidateSize();
+    }, 300);
+}, [mapFullscreen]);
 
             // Update Similar Areas when Active Location changes
             useEffect(() => {
@@ -90,6 +108,81 @@
                     setSimilarAreas([]);
                 }
             }, [activeLocation, areas]);
+
+            useEffect(() => {
+                if (!mapRef.current || leafletMap.current) return;
+
+                leafletMap.current = L.map(mapRef.current).setView(
+                    [13.0827, 80.2707], // Chennai default
+                    11
+                );
+
+                L.tileLayer(
+                    'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+                    {
+                        attribution: '&copy; OpenStreetMap contributors'
+                    }
+                ).addTo(leafletMap.current);
+
+leafletMap.current.on("click", function (e) {
+
+    const lat = e.latlng.lat;
+    const lng = e.latlng.lng;
+
+    if (markerRef.current) {
+        markerRef.current.remove();
+    }
+
+    markerRef.current = L.marker([lat, lng]).addTo(leafletMap.current);
+
+    // Reverse geocoding
+    axios.get(
+        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}`
+    )
+    .then(geoRes => {
+
+        const place =
+            geoRes.data.display_name || "Selected Location";
+
+        markerRef.current
+            .bindPopup(
+                `<b>${place}</b><br/>Lat: ${lat.toFixed(5)}<br/>Lng: ${lng.toFixed(5)}`
+            )
+            .openPopup();
+
+    })
+    .catch(() => {
+        markerRef.current
+            .bindPopup("Selected Location")
+            .openPopup();
+    });
+
+    // your backend nearest area search
+    axios.get(`${API_BASE}/nearest?lat=${lat}&lng=${lng}`)
+        .then(res => {
+            setActiveLocation(res.data);
+        });
+
+});
+
+            }, []);
+
+            useEffect(() => {
+                if (!leafletMap.current || !activeLocation) return;
+
+                const lat = activeLocation.latitude;
+                const lng = activeLocation.longitude;
+
+                leafletMap.current.setView([lat, lng], 14);
+
+                if (markerRef.current) {
+                    markerRef.current.remove();
+                }
+
+                markerRef.current = L.marker([lat, lng])
+                    .addTo(leafletMap.current);
+
+            }, [activeLocation]);
 
             const [sortBy, setSortBy] = useState("livability_score");
             const [ascending, setAscending] = useState(false);
@@ -155,55 +248,51 @@
                 setChatLoading(true);
 
                 axios.get(`${API_BASE}/recommend?query=${query}&city=${selectedCity}`)
-                    .then(res => {
-                        setChatLoading(false);
+                .then(res => {
+                    setChatLoading(false);
 
-                        // Handle new API response structure v2 (dict) or v1 (list)
-                        const results = Array.isArray(res.data) ? res.data : (res.data.results || []);
-                        const suggestedFields = res.data.suggested_fields || [];
+                    const results = Array.isArray(res.data)
+                        ? res.data
+                        : (res.data.results || []);
 
-                        if (results.length === 0) {
-                            setChatHistory(prev => [...prev, { type: 'bot', text: "No matches found." }]);
-                        } else {
-                            // 1. UPDATE CHAT
-                            let replyText = `Found ${results.length} matches.`;
-                            if (suggestedFields.length > 0) {
-                                replyText += ` I've highlighted parameters related to your search (${suggestedFields.join(", ")}).`;
-                            }
-                            setChatHistory(prev => [...prev, { type: 'bot', text: replyText, data: results }]);
+                    const suggestedFields = res.data.suggested_fields || [];
 
-                            // 2. SMART UI ADAPTATION (Auto-Select Columns)
-                            if (suggestedFields.length > 0) {
-                                setVisibleFields(prev => {
-                                    const next = { ...prev };
-                                    // Reset non-core fields
-                                    Object.keys(next).forEach(k => {
-                                        if (!['livability_score', 'sqft_price', 'aqi', 'local_congestion'].includes(k)) {
-                                            next[k] = false;
-                                        }
-                                    });
-                                    // Enable suggested fields
-                                    suggestedFields.forEach(f => {
-                                        if (next[f] !== undefined) next[f] = true;
-                                    });
-                                    return next;
-                                });
-                            }
+                    if (results.length === 0) {
+                        setChatHistory(prev => [
+                            ...prev,
+                            { type: 'bot', text: "No matches found." }
+                        ]);
+                        return;
+                    }
 
-                            // 3. REORDER TABLE
-                            const otherAreas = areas.filter(a => !results.find(m => m.area === a.area));
-                            const newAreaList = [...results, ...otherAreas];
-                            setAreas(newAreaList);
+                    let replyText = `Found ${results.length} matches.`;
 
-                            if (topMatches.length > 0) {
-                                setActiveLocation(topMatches[0]);
-                            }
-                        }
-                    })
-                    .catch(() => {
-                        setChatLoading(false);
-                        setChatHistory(prev => [...prev, { type: 'bot', text: "Error connecting to AI." }]);
-                    });
+                    if (suggestedFields.length > 0) {
+                        replyText += ` I've highlighted parameters related to your search (${suggestedFields.join(", ")}).`;
+                    }
+
+                    setChatHistory(prev => [
+                        ...prev,
+                        { type: 'bot', text: replyText, data: results }
+                    ]);
+
+                    const otherAreas = areas.filter(
+                        a => !results.find(m => m.area === a.area)
+                    );
+
+                    setAreas([...results, ...otherAreas]);
+
+                    setActiveLocation(results[0]);
+                })
+                .catch(err => {
+                    console.error(err);
+                    setChatLoading(false);
+
+                    setChatHistory(prev => [
+                        ...prev,
+                        { type: 'bot', text: "Error connecting to AI." }
+                    ]);
+                });
             };
 
             const addToCompare = (area) => {
@@ -219,46 +308,97 @@
                 setComparisonList(comparisonList.filter(a => a.area !== areaName));
             };
 
-            return (
-                <div className="min-h-screen pb-12 flex flex-col relative font-sans text-slate-900 bg-slate-50">
+return currentRoute === "/map" ? (
 
-                    {/* Header */}
-                    <div className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm px-6 py-3 flex justify-between items-center">
-                        <div className="flex items-center gap-2">
-                            <span className="bg-indigo-600 text-white p-1.5 rounded-lg font-bold">L</span>
-                            <h1 className="text-xl font-black tracking-tight text-slate-800">Livability<span className="text-indigo-600">AI</span></h1>
-                        </div>
-                        <select
-                            className="bg-slate-100 hover:bg-slate-200 font-bold py-2 px-4 rounded-lg cursor-pointer focus:outline-none focus:ring-2 focus:ring-indigo-500 transition text-sm"
-                            value={selectedCity}
-                            onChange={(e) => setSelectedCity(e.target.value)}
-                        >
-                            {cities.map(c => <option key={c} value={c}>{c}</option>)}
-                        </select>
+    /* FULLSCREEN MAP PAGE */
+    <div className="fixed inset-0 bg-white z-50 flex flex-col">
+
+        {/* Top Bar */}
+        <div className="bg-slate-900 text-white px-6 py-4 flex justify-between items-center shadow-lg">
+            <h1 className="text-xl font-black">
+                LivabilityAI Map View
+            </h1>
+
+            <button
+                onClick={goHome}
+                className="bg-red-500 hover:bg-red-600 px-4 py-2 rounded-lg font-bold"
+            >
+                ✕ Exit
+            </button>
+        </div>
+
+        {/* Fullscreen Map */}
+        <div className="flex-1 relative">
+            <div ref={mapRef} className="w-full h-full"></div>
+
+            <div className="absolute bottom-4 left-4 bg-white px-4 py-2 rounded-xl shadow-lg border">
+                <p className="text-xs text-slate-400 uppercase">
+                    Viewing
+                </p>
+                <p className="font-bold text-slate-800">
+                    {activeLocation?.area || "Select on map"}
+                </p>
+            </div>
+        </div>
+
+    </div>
+
+) : (
+
+<div className="min-h-screen pb-12 flex flex-col relative font-sans text-slate-900 bg-slate-50">
+
+    {/* Header */}
+    <div className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm px-6 py-3 flex justify-between items-center">
+        <div className="flex items-center gap-2">
+            <span className="bg-indigo-600 text-white p-1.5 rounded-lg font-bold"></span>
+            <h1 className="text-xl font-black tracking-tight text-slate-800">
+                Livability<span className="text-indigo-600">AI</span>
+            </h1>
+        </div>
+
+        <select
+            className="bg-slate-100 hover:bg-slate-200 font-bold py-2 px-4 rounded-lg cursor-pointer focus:outline-none focus:ring-2 focus:ring-indigo-500 transition text-sm"
+            value={selectedCity}
+            onChange={(e) => setSelectedCity(e.target.value)}
+        >
+            {cities.map(c => (
+                <option key={c} value={c}>{c}</option>
+            ))}
+        </select>
+    </div>
+
+    <div className="max-w-[1800px] mx-auto px-4 py-6 w-full grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+
+        {/* LEFT: Map & Stats */}
+        <div className="lg:col-span-4 xl:col-span-3 space-y-4 lg:sticky lg:top-24 max-h-[calc(100vh-8rem)] overflow-y-auto pr-2 scrollbar-hide">
+
+            {/* NORMAL MAP CARD */}
+            <div className="bg-white p-1 rounded-2xl shadow-lg border border-slate-200">
+
+                <div className="relative w-full aspect-square bg-slate-200 rounded-xl overflow-hidden group">
+
+                    <div ref={mapRef} className="w-full h-full"></div>
+
+                    {/* Fullscreen Route Button */}
+                    <button
+                        onClick={goToMap}
+                        className="absolute top-3 right-3 z-[1000] bg-white px-3 py-2 rounded-lg shadow font-bold text-sm hover:bg-slate-100"
+                    >
+                        ⛶ Fullscreen
+                    </button>
+
+                    {/* Current Area */}
+                    <div className="absolute bottom-3 left-3 bg-white/95 backdrop-blur px-3 py-1.5 rounded-lg shadow-sm border border-slate-200 pointer-events-none">
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                            Viewing
+                        </p>
+                        <p className="font-bold text-slate-800 text-sm leading-tight">
+                            {activeLocation?.area || "Select on map"}
+                        </p>
                     </div>
 
-                    <div className="max-w-[1800px] mx-auto px-4 py-6 w-full grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-
-                        {/* LEFT: Map & Stats */}
-                        <div className="lg:col-span-4 xl:col-span-3 space-y-4 lg:sticky lg:top-24 max-h-[calc(100vh-8rem)] overflow-y-auto pr-2 scrollbar-hide">
-                            <div className="bg-white p-1 rounded-2xl shadow-lg border border-slate-200">
-                                <div className="relative w-full aspect-square bg-slate-200 rounded-xl overflow-hidden group">
-                                    {activeLocation ? (
-                                        <iframe
-                                            className="w-full h-full"
-                                            frameBorder="0"
-                                            scrolling="no"
-                                            src={`https://maps.google.com/maps?q=${activeLocation.latitude},${activeLocation.longitude}&hl=en&z=15&output=embed`}
-                                        ></iframe>
-                                    ) : (
-                                        <div className="flex items-center justify-center h-full text-slate-400 font-bold">Select an area</div>
-                                    )}
-                                    <div className="absolute bottom-3 left-3 bg-white/95 backdrop-blur px-3 py-1.5 rounded-lg shadow-sm border border-slate-200 pointer-events-none">
-                                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Viewing</p>
-                                        <p className="font-bold text-slate-800 text-sm leading-tight">{activeLocation?.area || "..."}</p>
-                                    </div>
-                                </div>
-                            </div>
+                </div>
+            </div>  
 
                             {activeLocation && (
                                 <div className="bg-indigo-900 text-white rounded-2xl p-5 shadow-xl relative overflow-hidden">
@@ -293,7 +433,7 @@
                                             onClick={() => addToCompare(activeLocation)}
                                             className="flex-1 bg-white/10 hover:bg-white/20 text-white py-2 rounded-lg text-xs font-bold transition flex items-center justify-center gap-2"
                                         >
-                                            <span>🆚</span> Add to Compare {comparisonList.find(a => a.area === activeLocation.area) ? '(Added)' : ''}
+                                            <span></span> Add to Compare {comparisonList.find(a => a.area === activeLocation.area) ? '(Added)' : ''}
                                         </button>
                                     </div>
 
